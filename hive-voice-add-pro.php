@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: HiveVoice ADD Pro
- * Version: 1.0
+ * Version: 1.1
  * Description: Голосове додавання оголошень для HivePress
  * Author: WooQuick
  * GitHub Plugin URI: portallcomua/hive-voice-add-pro
@@ -10,7 +10,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('HVA_VERSION', '1.0');
+define('HVA_VERSION', '1.1');
 define('HVA_FREE_LIMIT', 25);
 define('HVA_SHOP_URL', 'https://uaserver.pp.ua/product/hivevoice-add-pro/');
 
@@ -435,4 +435,21 @@ add_action('wp_ajax_hva_save_listing', function() {
                         'post_title' => 'Listing Image',
                         'post_status' => 'inherit'
                     ], $upload['file'], $listing_id);
-                    require_once(ABSPATH . 'wp-admin/includ
+                    require_once(ABSPATH . 'wp-admin/includes/image.php');
+                    wp_update_attachment_metadata($attach_id, wp_generate_attachment_metadata($attach_id, $upload['file']));
+                    if ($idx === 0) {
+                        set_post_thumbnail($listing_id, $attach_id);
+                    } else {
+                        $gallery_ids[] = $attach_id;
+                    }
+                }
+            }
+        }
+        if (!empty($gallery_ids)) {
+            update_post_meta($listing_id, '_hva_image_gallery', implode(',', $gallery_ids));
+        }
+    }
+    
+    wp_send_json_success(['id' => $listing_id]);
+});
+?>
