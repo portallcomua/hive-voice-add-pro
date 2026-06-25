@@ -1,0 +1,523 @@
+<?php
+/**
+ * Plugin Name: HP Quick ADD
+ * Plugin URI:  https://uaserver.pp.ua/hp-quick-add/
+ * Description: Voice listing adding for HivePress. Photo, voice dictation, attributes, tags, CSV export.
+ * Version:     1.0.0
+ * Author:      UAServer
+ * Author URI:  https://uaserver.pp.ua/
+ * License:     GPL v2 or later
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
+ * Text Domain: hp-quick-add
+ * Domain Path: /languages
+ * Requires at least: 5.8
+ * Requires PHP: 7.4
+ */
+if (!defined('ABSPATH')) exit;
+
+define('HPA_VERSION',    '1.0.0');
+define('HPA_FREE_LIMIT', 25);
+define('HPA_FILE',       __FILE__);
+define('HPA_SLUG',       'hp-quick-add');
+define('HPA_GITHUB',     'portallcomua/hp-quick-add');
+
+// ── GITHUB AUTO-UPDATE ────────────────────────────────────────────────
+class HPA_Updater {
+    private $file, $slug, $repo;
+    public function __construct($file, $repo) {
+        $this->file = $file; $this->slug = HPA_SLUG; $this->repo = $repo;
+        add_filter('pre_set_site_transient_update_plugins', [$this,'check']);
+        add_filter('plugins_api', [$this,'info'], 10, 3);
+    }
+    public function check($t) {
+        if (empty($t->checked)) return $t;
+        $r = $this->remote();
+        if ($r && version_compare(HPA_VERSION, $r->version, '<'))
+            $t->response[plugin_basename($this->file)] = (object)[
+                'slug'=>$this->slug,'plugin'=>plugin_basename($this->file),
+                'new_version'=>$r->version,'package'=>$r->zip,'url'=>$r->url,'tested'=>'6.8','requires_php'=>'7.4',
+            ];
+        return $t;
+    }
+    public function info($res, $action, $args) {
+        if ($action !== 'plugin_information') return $res;
+        if (!isset($args->slug) || $args->slug !== $this->slug) return $res;
+        $r = $this->remote(); if (!$r) return $res;
+        return (object)['name'=>'HP Quick ADD','slug'=>$this->slug,'version'=>$r->version,
+            'author'=>'<a href="https://uaserver.pp.ua">UAServer</a>',
+            'homepage'=>'https://uaserver.pp.ua/hp-quick-add/',
+            'download_link'=>$r->zip,'tested'=>'6.8','requires'=>'5.8','requires_php'=>'7.4',
+            'sections'=>['description'=>'Voice listing adding for HivePress.','changelog'=>$r->changelog??'See GitHub.'],
+        ];
+    }
+    private function remote() {
+        $c = get_transient('hpa_github_release'); if ($c) return $c;
+        $resp = wp_remote_get("https://api.github.com/repos/{$this->repo}/releases/latest",
+            ['headers'=>['Accept'=>'application/vnd.github+json','User-Agent'=>'HPQuickADD/'.HPA_VERSION],'timeout'=>10]);
+        if (is_wp_error($resp)) return null;
+        $d = json_decode(wp_remote_retrieve_body($resp));
+        if (!$d || !isset($d->tag_name)) return null;
+        $obj = (object)['version'=>ltrim($d->tag_name,'v'),'zip'=>$d->zipball_url,'url'=>$d->html_url,'changelog'=>$d->body??''];
+        set_transient('hpa_github_release', $obj, 6*HOUR_IN_SECONDS);
+        return $obj;
+    }
+}
+new HPA_Updater(HPA_FILE, HPA_GITHUB);
+
+// ── HELPERS ───────────────────────────────────────────────────────────
+function hpa_en()       { return in_array(get_locale(),['en_US','en_GB','en_CA','en_AU','en']); }
+function hpa_t($ua,$en) { return hpa_en()?$en:$ua; }
+function hpa_count()    { return (int)get_option('hpa_ops',0); }
+function hpa_inc()      { update_option('hpa_ops',hpa_count()+1); }
+function hpa_limit()    { return (int)get_option('hpa_free_limit',HPA_FREE_LIMIT); }
+function hpa_left()     { return max(0,hpa_limit()-hpa_count()); }
+function hpa_can()      { return hpa_pro()||hpa_count()<hpa_limit(); }
+function hpa_sysinfo()  {
+    global $wp_version;
+    $hp = class_exists('HivePress\Core')?'active':'n/a';
+    return "WP:{$wp_version} HP:{$hp} PHP:".PHP_VERSION." Plugin:".HPA_VERSION." Lic:".(hpa_pro()?'PRO':'Free '.hpa_count().'/'.hpa_limit())." ".home_url();
+}
+
+// ── LICENSE — PAYHIP ──────────────────────────────────────────────────
+function hpa_pro() {
+    $key = get_option('hpa_license_key',''); if (!$key) return false;
+    $c = get_transient('hpa_lic_'.md5($key)); if ($c!==false) return $c==='1';
+    $ok = hpa_validate_license($key);
+    set_transient('hpa_lic_'.md5($key),$ok?'1':'0',12*HOUR_IN_SECONDS);
+    return $ok;
+}
+function hpa_validate_license($key) {
+    $licenses = get_option('hpa_licenses',[]);
+    if (isset($licenses[$key]) && $licenses[$key]['status']==='active') return true;
+    $server = get_option('hpa_license_server','');
+    if ($server) {
+        $r = wp_remote_post(trailingslashit($server).'validate',['body'=>['key'=>$key,'site'=>home_url(),'plugin'=>'hp-quick-add'],'timeout'=>8]);
+        if (!is_wp_error($r)){$b=json_decode(wp_remote_retrieve_body($r),true);return !empty($b['valid']);}
+    }
+    return false;
+}
+function hpa_activate_license($key) {
+    $key = strtoupper(trim($key));
+    if (empty($key)) return ['ok'=>false,'err'=>hpa_t('Введіть ключ','Enter key')];
+    $licenses = get_option('hpa_licenses',[]);
+    if (isset($licenses[$key]) && $licenses[$key]['status']==='active') {
+        update_option('hpa_license_key',$key); delete_transient('hpa_lic_'.md5($key)); return ['ok'=>true];
+    }
+    $server = get_option('hpa_license_server','');
+    if ($server) {
+        $r = wp_remote_post(trailingslashit($server).'activate',['body'=>['key'=>$key,'site'=>home_url(),'plugin'=>'hp-quick-add'],'timeout'=>10]);
+        if (!is_wp_error($r)){$b=json_decode(wp_remote_retrieve_body($r),true);if(!empty($b['activated'])){update_option('hpa_license_key',$key);delete_transient('hpa_lic_'.md5($key));return['ok'=>true];}return['ok'=>false,'err'=>$b['error']??hpa_t('Невірний ключ','Invalid key')];}
+    }
+    return ['ok'=>false,'err'=>hpa_t('Ключ не знайдено','Key not found')];
+}
+function hpa_deactivate_license() {
+    $key=get_option('hpa_license_key',''); delete_option('hpa_license_key');
+    if($key) delete_transient('hpa_lic_'.md5($key));
+}
+
+// Payhip webhook
+add_action('rest_api_init',function(){
+    register_rest_route('hpa/v1','/payhip-webhook',['methods'=>'POST','callback'=>'hpa_payhip_webhook','permission_callback'=>'__return_true']);
+});
+function hpa_payhip_webhook($request) {
+    $secret=get_option('hpa_payhip_secret','');
+    if($secret){$sig=$request->get_header('X-Payhip-Signature')??'';$body=$request->get_body();if(!hash_equals(hash_hmac('sha256',$body,$secret),$sig))return new WP_REST_Response(['error'=>'Invalid signature'],403);}
+    $data=$request->get_json_params(); $event=$data['event']??'';
+    if($event==='payment:completed'){
+        $email=$data['buyer']['email']??''; $pid=$data['product']['id']??'';
+        $key='HPA-'.strtoupper(substr(md5($email.$pid.time()),0,8)).'-'.strtoupper(substr(md5(rand()),0,8));
+        $licenses=get_option('hpa_licenses',[]); $licenses[$key]=['status'=>'active','email'=>$email,'created'=>date('Y-m-d H:i:s')];
+        update_option('hpa_licenses',$licenses);
+        wp_mail($email,hpa_t('Ваш ліцензійний ключ HP Quick ADD PRO','Your HP Quick ADD PRO License Key'),
+            hpa_t("Дякуємо!\n\nКлюч: {$key}\n\nАктивуйте: WP Admin → HP Quick ADD → Ліцензія\n\nПідтримка: support@uaserver.pp.ua",
+                  "Thank you!\n\nKey: {$key}\n\nActivate at: WP Admin → HP Quick ADD → License\n\nSupport: support@uaserver.pp.ua"));
+    }
+    return new WP_REST_Response(['status'=>'ok'],200);
+}
+
+register_activation_hook(__FILE__,function(){ add_option('hpa_free_limit',HPA_FREE_LIMIT); add_option('hpa_ops',0); add_option('hpa_licenses',[]); });
+
+// ── MENU ──────────────────────────────────────────────────────────────
+add_action('admin_menu',function(){
+    add_menu_page('HP Quick ADD','HP Quick ADD','edit_posts','hpa_main','hpa_page_main','dashicons-microphone',31);
+    add_submenu_page('hpa_main',hpa_t('Ліцензія','License'),'🔑 '.hpa_t('Ліцензія','License'),'edit_posts','hpa_license','hpa_page_license');
+    add_submenu_page('hpa_main',hpa_t('Налаштування','Settings'),'⚙️ '.hpa_t('Налаштування','Settings'),'edit_posts','hpa_settings','hpa_page_settings');
+    add_submenu_page('hpa_main',hpa_t('Підтримка','Support'),'📞 '.hpa_t('Підтримка','Support'),'edit_posts','hpa_support','hpa_page_support');
+});
+
+// ── SETTINGS ──────────────────────────────────────────────────────────
+function hpa_page_settings(){
+    if(isset($_POST['hpa_save'])&&check_admin_referer('hpa_cfg')){
+        update_option('hpa_free_limit',max(1,(int)$_POST['free_limit']));
+        update_option('hpa_rbg_api',sanitize_text_field($_POST['rbg_api']));
+        update_option('hpa_payhip_url',esc_url_raw($_POST['payhip_url']));
+        update_option('hpa_payhip_secret',sanitize_text_field($_POST['payhip_secret']));
+        update_option('hpa_license_server',esc_url_raw($_POST['license_server']));
+        update_option('hpa_listing_status',sanitize_text_field($_POST['listing_status']));
+        delete_transient('hpa_github_release');
+        echo '<div class="notice notice-success"><p>✅ '.hpa_t('Збережено!','Saved!').'</p></div>';
+    }
+    if(isset($_POST['hpa_gen_key'])&&current_user_can('administrator')&&check_admin_referer('hpa_cfg')){
+        $key='HPA-'.strtoupper(substr(md5(uniqid(mt_rand(),true)),0,8)).'-'.strtoupper(substr(md5(rand()),0,8));
+        $email=sanitize_email($_POST['gen_email']??'');
+        $licenses=get_option('hpa_licenses',[]); $licenses[$key]=['status'=>'active','email'=>$email,'created'=>date('Y-m-d H:i:s'),'manual'=>true];
+        update_option('hpa_licenses',$licenses);
+        if($email) wp_mail($email,hpa_t('Ваш ліцензійний ключ HPA PRO','Your HPA PRO License Key'),hpa_t("Ключ: {$key}","Key: {$key}"));
+        echo '<div class="notice notice-success"><p>✅ '.hpa_t('Ключ:','Key:').' <code>'.$key.'</code></p></div>';
+    }
+    $rbg=get_option('hpa_rbg_api',''); $licenses=get_option('hpa_licenses',[]);
+    $status=get_option('hpa_listing_status','publish');
+    $webhook=rest_url('hpa/v1/payhip-webhook');
+    ?><div class="wrap"><h1>⚙️ <?php echo hpa_t('Налаштування HP Quick ADD','HP Quick ADD Settings')?></h1>
+    <form method="post"><?php wp_nonce_field('hpa_cfg')?>
+    <table class="form-table">
+    <tr><th><?php echo hpa_t('Безкоштовний ліміт','Free limit')?></th><td><input type="number" name="free_limit" value="<?php echo esc_attr(hpa_limit())?>" style="width:100px"> <?php echo hpa_t('оголошень','listings')?></td></tr>
+    <tr><th><?php echo hpa_t('Статус оголошення','Listing status')?></th><td>
+        <select name="listing_status" style="padding:6px 10px;border-radius:6px">
+            <option value="publish" <?php selected($status,'publish')?>><?php echo hpa_t('Опублікувати','Publish')?></option>
+            <option value="pending" <?php selected($status,'pending')?>><?php echo hpa_t('На модерацію','Pending')?></option>
+            <option value="draft"   <?php selected($status,'draft')?>  >Draft</option>
+        </select></td></tr>
+    </table>
+    <h2>🛒 Payhip</h2>
+    <div style="background:#e8f4fd;padding:14px;border-radius:8px;margin-bottom:14px;font-size:13px;line-height:1.9">
+        <b><?php echo hpa_t('Налаштування:','Setup:')?></b><br>
+        1. <a href="https://payhip.com" target="_blank">payhip.com</a> — <?php echo hpa_t('безкоштовно, 5% комісія','free, 5% fee')?><br>
+        2. <?php echo hpa_t('Створіть продукт → посилання нижче','Create product → link below')?><br>
+        3. Webhook URL: <code><?php echo esc_html($webhook)?></code>
+    </div>
+    <table class="form-table">
+    <tr><th>Payhip URL</th><td><input type="url" name="payhip_url" value="<?php echo esc_attr(get_option('hpa_payhip_url',''))?>" style="width:420px" placeholder="https://payhip.com/b/XXXXX"></td></tr>
+    <tr><th>Webhook Secret</th><td><input type="password" name="payhip_secret" value="<?php echo esc_attr(get_option('hpa_payhip_secret',''))?>" style="width:300px"></td></tr>
+    <tr><th><?php echo hpa_t('Сервер ліцензій','License server')?></th><td><input type="url" name="license_server" value="<?php echo esc_attr(get_option('hpa_license_server',''))?>" style="width:420px"></td></tr>
+    <tr><th>Remove.bg API Key</th><td>
+        <input type="<?php echo $rbg?'password':'text'?>" name="rbg_api" value="<?php echo esc_attr($rbg)?>" style="width:340px">
+        <?php if($rbg) echo '<span style="color:#198754;margin-left:8px">✅ Active</span>'?>
+        <p class="description"><a href="https://www.remove.bg/api" target="_blank">remove.bg/api</a></p></td></tr>
+    </table>
+    <input type="hidden" name="hpa_save" value="1"><?php submit_button(hpa_t('Зберегти','Save'))?>
+    </form>
+    <hr><h2><?php echo hpa_t('🔑 Ліцензії','🔑 Licenses')?></h2>
+    <form method="post" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px"><?php wp_nonce_field('hpa_cfg')?>
+        <input type="email" name="gen_email" placeholder="Email" style="width:220px;padding:6px 9px">
+        <button type="submit" name="hpa_gen_key" class="button">🔄 <?php echo hpa_t('Згенерувати ключ','Generate key')?></button>
+    </form>
+    <?php if(!empty($licenses)): ?><table class="widefat" style="max-width:800px"><thead><tr><th><?php echo hpa_t('Ключ','Key')?></th><th>Email</th><th><?php echo hpa_t('Дата','Date')?></th><th>Status</th></tr></thead><tbody>
+    <?php foreach(array_reverse($licenses,true) as $k=>$l): ?><tr><td><code style="font-size:12px"><?php echo esc_html($k)?></code></td><td><?php echo esc_html($l['email']??'')?></td><td><?php echo esc_html($l['created']??'')?></td><td style="color:<?php echo($l['status']==='active'?'#198754':'#dc3545')?>"><?php echo esc_html($l['status']??'')?></td></tr><?php endforeach?></tbody></table><?php endif?>
+    </div><?php
+}
+
+// ── SUPPORT ───────────────────────────────────────────────────────────
+function hpa_page_support(){
+    if(isset($_POST['hpa_ticket'])&&check_admin_referer('hpa_tkt')){wp_mail('support@uaserver.pp.ua','[HPQuickADD] '.sanitize_text_field($_POST['subject']),"From: ".sanitize_email($_POST['email'])."\n\n".sanitize_textarea_field($_POST['message'])."\n\n---\n".hpa_sysinfo());echo '<div class="notice notice-success"><p>✅ '.hpa_t('Надіслано!','Sent!').'</p></div>';}
+    ?><div class="wrap"><h1>📞 <?php echo hpa_t('Підтримка','Support')?></h1>
+    <pre id="hsi" style="background:#fff;padding:10px;border:1px solid #ddd;overflow:auto;margin-bottom:8px"><?php echo esc_html(hpa_sysinfo())?></pre>
+    <button onclick="navigator.clipboard.writeText(document.getElementById('hsi').innerText)" class="button" style="margin-bottom:20px">📋 Copy</button>
+    <form method="post"><?php wp_nonce_field('hpa_tkt')?>
+    <table class="form-table">
+        <tr><th>Email</th><td><input type="email" name="email" required style="width:100%"></td></tr>
+        <tr><th><?php echo hpa_t('Тема','Subject')?></th><td><input type="text" name="subject" required style="width:100%"></td></tr>
+        <tr><th><?php echo hpa_t('Повідомлення','Message')?></th><td><textarea name="message" rows="5" required style="width:100%"></textarea></td></tr>
+    </table>
+    <input type="hidden" name="hpa_ticket" value="1"><?php submit_button(hpa_t('📧 Надіслати','📧 Send'),'primary')?>
+    </form></div><?php
+}
+
+// ── LICENSE PAGE ───────────────────────────────────────────────────────
+function hpa_page_license(){
+    $pro=hpa_pro();
+    if(isset($_POST['hpa_activate'])&&check_admin_referer('hpa_lic_u')){$r=hpa_activate_license(sanitize_text_field($_POST['lic_key']));if($r['ok']){$pro=true;echo '<div class="notice notice-success"><p>✅ '.hpa_t('PRO активовано!','PRO activated!').'</p></div>';}else echo '<div class="notice notice-error"><p>❌ '.esc_html($r['err']).'</p></div>';}
+    if(isset($_POST['hpa_deactivate'])&&check_admin_referer('hpa_lic_u')){hpa_deactivate_license();$pro=false;echo '<div class="notice notice-info"><p>'.hpa_t('Деактивовано','Deactivated').'</p></div>';}
+    $buy=get_option('hpa_payhip_url','');
+    ?><div class="wrap"><h1>🔑 <?php echo hpa_t('Ліцензія HP Quick ADD','HP Quick ADD License')?></h1>
+    <?php if($pro): ?>
+        <div class="notice notice-success"><p>✅ PRO <?php echo hpa_t('— активна','— active')?></p></div>
+        <form method="post"><?php wp_nonce_field('hpa_lic_u')?><button type="submit" name="hpa_deactivate" class="button">🚫 <?php echo hpa_t('Деактивувати','Deactivate')?></button></form>
+    <?php else: ?>
+        <div class="notice notice-warning"><p>⚠️ <?php echo hpa_t('Залишилось:','Remaining:')?> <strong><?php echo hpa_left()?></strong>/<?php echo hpa_limit()?></p></div>
+        <div style="background:#f9f9f9;padding:20px;border-radius:10px;margin:16px 0;max-width:520px">
+            <form method="post" style="display:flex;gap:10px;flex-wrap:wrap"><?php wp_nonce_field('hpa_lic_u')?>
+            <input type="text" name="lic_key" placeholder="HPA-XXXXXXXX-XXXXXXXX" style="width:270px;padding:8px 10px;border:1px solid #ccc;border-radius:6px">
+            <button type="submit" name="hpa_activate" class="button button-primary">🔑 <?php echo hpa_t('Активувати','Activate')?></button>
+            </form>
+        </div>
+        <?php if($buy): ?><a href="<?php echo esc_url($buy)?>" target="_blank" style="display:inline-block;background:#ff6b35;color:#fff;padding:13px 30px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">🛒 <?php echo hpa_t('Придбати на Payhip','Buy on Payhip')?> — $29</a><?php endif?>
+    <?php endif?>
+    </div><?php
+}
+
+// ── MAIN PAGE ──────────────────────────────────────────────────────────
+function hpa_page_main(){
+    $en      = hpa_en();
+    $pro     = hpa_pro();
+    $has_rbg = !empty(get_option('hpa_rbg_api',''));
+
+    // Отримуємо атрибути HivePress (таксономії hp_*)
+    $hp_attrs = [];
+    $taxonomies = get_taxonomies(['object_type'=>['hp_listing']],'objects');
+    foreach($taxonomies as $tax=>$obj){
+        if(strpos($tax,'hp_')!==0) continue;
+        $terms=get_terms(['taxonomy'=>$tax,'hide_empty'=>false]);
+        $options=[];
+        if(!is_wp_error($terms)) foreach($terms as $term) $options[$term->slug]=$term->name;
+        $hp_attrs[$tax]=['label'=>$obj->label,'options'=>$options];
+    }
+
+    // Маяки: фіксовані + всі атрибути
+    $fixed_ua = ['заголовок','опис','ціна','місто','категорія'];
+    $fixed_en = ['title','description','price','location','category'];
+    $fixed    = $en ? $fixed_en : $fixed_ua;
+
+    // Будуємо textarea template: фіксовані поля + атрибути
+    $tpl_lines = [];
+    foreach(($en?['TITLE','DESCRIPTION','PRICE','LOCATION','CATEGORY']:['ЗАГОЛОВОК','ОПИС','ЦІНА','МІСТО','КАТЕГОРІЯ']) as $f)
+        $tpl_lines[] = $f.': ';
+    foreach($hp_attrs as $tax=>$attr)
+        $tpl_lines[] = mb_strtoupper($attr['label']).': ';
+    $template = implode("\n",$tpl_lines);
+
+    // voiceMap для JS
+    $vm = [];
+    $keys_map = $en
+        ? ['TITLE'=>'TITLE','DESCRIPTION'=>'DESCRIPTION','PRICE'=>'PRICE','LOCATION'=>'LOCATION','CATEGORY'=>'CATEGORY']
+        : ['ЗАГОЛОВОК'=>'ЗАГОЛОВОК','ОПИС'=>'ОПИС','ЦІНА'=>'ЦІНА','МІСТО'=>'МІСТО','КАТЕГОРІЯ'=>'КАТЕГОРІЯ'];
+    foreach($keys_map as $beacon=>$field)
+        $vm[mb_strtolower($beacon)] = ['field'=>$field,'type'=>'simple','key'=>mb_strtolower($beacon)];
+    // Аліаси
+    $aliases = $en
+        ? ['title'=>'TITLE','desc'=>'DESCRIPTION','price'=>'PRICE','location'=>'LOCATION','city'=>'LOCATION','category'=>'CATEGORY']
+        : ['заголовок'=>'ЗАГОЛОВОК','назва'=>'ЗАГОЛОВОК','описую'=>'ОПИС','опис'=>'ОПИС','ціна'=>'ЦІНА','вартість'=>'ЦІНА','місто'=>'МІСТО','місцезнаходження'=>'МІСТО','категорія'=>'КАТЕГОРІЯ'];
+    foreach($aliases as $b=>$f) $vm[$b]=['field'=>$f,'type'=>'simple','key'=>$b];
+    // Атрибути HP
+    foreach($hp_attrs as $tax=>$attr){
+        $beacon = mb_strtolower($attr['label']);
+        $vm[$beacon]=['field'=>mb_strtoupper($attr['label']),'type'=>'hp_attr','tax'=>$tax,'options'=>$attr['options'],'key'=>$beacon];
+    }
+
+    $cfg = [
+        'EN'=>$en,'PRO'=>$pro,'HAS_RBG'=>$has_rbg,'CAN'=>hpa_can(),
+        'AJAX'=>admin_url('admin-ajax.php'),
+        'NS'=>wp_create_nonce('hpa_save'),
+        'NE'=>wp_create_nonce('hpa_export'),
+        'TPL'=>$template,'VM'=>$vm,
+        'ATTR_T'=>$en?'attribute':'атрибут',
+        'TAG_T'=>$en?'tag':'мітка',
+        'STATUS'=>get_option('hpa_listing_status','publish'),
+    ];
+    ?>
+<style>@keyframes hpa_p{0%,100%{opacity:1}50%{opacity:.5}}#hpa_w *{box-sizing:border-box}.hb{cursor:pointer;border:none;color:#fff;font-weight:bold;border-radius:8px}</style>
+<div id="hpa_w" style="max-width:800px;margin:auto;padding:20px 14px">
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+    <h1 style="margin:0">🎤 HP Quick ADD <sup style="font-size:11px;color:#aaa;font-weight:400">v<?php echo HPA_VERSION?></sup></h1>
+    <div style="display:flex;gap:5px;flex-wrap:wrap">
+        <a href="<?php echo admin_url('admin.php?page=hpa_license')?>" class="button">🔑</a>
+        <a href="<?php echo admin_url('admin.php?page=hpa_settings')?>" class="button">⚙️</a>
+        <button id="hpa_exp_btn" class="hb" style="background:#0d6efd;font-size:13px;padding:7px 14px">📤 CSV</button>
+    </div>
+</div>
+<div style="background:<?php echo $pro?'#d1e7dd':'#fff3cd'?>;padding:10px 14px;border-radius:8px;margin-bottom:12px;font-size:14px">
+    <?php if($pro): ?>✅ PRO <?php echo hpa_t('— безлімітно','— unlimited')?>
+    <?php else: ?>📊 <?php echo hpa_t('Залишилось:','Left:')?> <strong><?php echo hpa_left()?></strong>/<?php echo hpa_limit()?>
+    <?php if(!hpa_can()): ?>&nbsp;<a href="<?php echo admin_url('admin.php?page=hpa_license')?>" style="color:#c00;font-weight:bold">💰 <?php echo hpa_t('Купити →','Buy →')?></a><?php endif?>
+    <?php endif?>
+</div>
+<video id="hpa_cam" autoplay playsinline muted style="width:100%;background:#111;border-radius:10px;margin-bottom:6px;max-height:280px;object-fit:cover"></video>
+<div id="hpa_gal" style="display:flex;gap:4px;flex-wrap:wrap;min-height:2px;margin-bottom:8px"></div>
+<?php if($has_rbg): ?>
+<div id="hpa_bg_wrap" style="background:#f8f9fa;border-radius:10px;padding:10px 14px;margin-bottom:10px;display:none">
+    <div style="font-size:13px;font-weight:bold;margin-bottom:8px">🖼️ <?php echo hpa_t('Фон фото:','Photo background:')?></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer"><input type="radio" name="hpa_bg" value="original" checked> <?php echo hpa_t('Оригінал','Original')?></label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer"><input type="radio" name="hpa_bg" value="transparent"><span style="width:18px;height:18px;background:repeating-conic-gradient(#ccc 0% 25%,#fff 0% 50%) 0/8px 8px;border:1px solid #aaa;border-radius:3px;display:inline-block"></span><?php echo hpa_t('Прозорий','Transparent')?></label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer"><input type="radio" name="hpa_bg" value="ffffff"><span style="width:18px;height:18px;background:#fff;border:1px solid #aaa;border-radius:3px;display:inline-block"></span><?php echo hpa_t('Білий','White')?></label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer"><input type="radio" name="hpa_bg" value="000000"><span style="width:18px;height:18px;background:#000;border:1px solid #aaa;border-radius:3px;display:inline-block"></span><?php echo hpa_t('Чорний','Black')?></label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer"><input type="radio" name="hpa_bg" value="custom"><?php echo hpa_t('Колір:','Color:')?><input type="color" id="hpa_cc" value="#ffffff" style="width:30px;height:22px;padding:0;border:1px solid #ccc;margin-left:3px;cursor:pointer"></label>
+    </div>
+    <div id="hpa_bg_st" style="margin-top:6px;font-size:12px;color:#666;display:none"></div>
+</div>
+<?php endif?>
+<div style="display:flex;gap:8px;margin-bottom:12px">
+    <button id="hpa_photo_btn" class="hb" style="flex:3;background:#2271b1;font-size:15px;padding:12px">📷 <?php echo hpa_t('ФОТО','PHOTO')?></button>
+    <button id="hpa_clr_btn"   class="hb" style="flex:1;background:#6c757d;font-size:14px;padding:12px">❌</button>
+</div>
+<div id="hpa_bar" style="display:none;padding:12px;border-radius:9px;font-size:15px;font-weight:bold;text-align:center;color:#fff;margin-bottom:8px"></div>
+<label style="font-weight:bold;display:block;margin-bottom:5px">📝 <?php echo hpa_t('ДАНІ ОГОЛОШЕННЯ — говоріть: маяк → значення','LISTING DATA — say: beacon → value')?></label>
+<?php if(!empty($hp_attrs)): ?>
+<p style="margin:0 0 6px;font-size:12px;color:#777">
+    <?php echo hpa_t('Маяки для атрибутів: ','Attribute beacons: ')?>
+    <?php echo implode(', ', array_map(fn($a)=>'«'.mb_strtolower($a['label']).'»', $hp_attrs))?>
+</p>
+<?php endif?>
+<textarea id="hpa_ta" rows="<?php echo count($tpl_lines)?>" style="width:100%;font-family:monospace;font-size:14px;padding:10px 12px;border:2px solid #2271b1;border-radius:10px;line-height:1.8;resize:vertical"><?php echo esc_textarea($template)?></textarea>
+<div style="margin-top:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <label style="font-weight:bold">🏷️ <?php echo hpa_t('НОВІ АТРИБУТИ','NEW ATTRIBUTES')?></label>
+        <button id="hpa_add_attr_btn" class="hb" style="background:#6f42c1;font-size:13px;padding:7px 13px">+ <?php echo hpa_t('Додати','Add')?></button>
+    </div>
+    <p style="margin:0 0 6px;font-size:12px;color:#777"><?php echo hpa_t('Голос: «атрибут якість нова» — створить атрибут і додасть значення. «атрибут якість б/у» — допише значення.','Voice: «attribute condition new» — creates attribute & adds value. «attribute condition used» — appends value.')?></p>
+    <div id="hpa_attrs"></div>
+</div>
+<div style="margin-top:12px">
+    <label style="font-weight:bold;display:block;margin-bottom:4px">🔖 <?php echo hpa_t('МІТКИ','TAGS')?></label>
+    <input type="text" id="hpa_tags" placeholder="<?php echo hpa_t('мітки через кому','tags comma-separated')?>" style="width:100%;padding:9px 12px;border:1px solid #ccc;border-radius:8px;font-size:14px">
+    <p style="margin:4px 0 0;font-size:12px;color:#777"><?php echo hpa_t('Голос: «мітка новинка» → «мітка терміново»','Voice: «tag new» → «tag urgent»')?></p>
+</div>
+<div style="display:flex;gap:8px;margin-top:14px">
+    <button id="hpa_mic_btn" class="hb" style="flex:1;background:#1877F2;font-size:16px;padding:14px">🎤 <?php echo hpa_t('ДИКТУВАТИ','VOICE INPUT')?></button>
+</div>
+<button id="hpa_save_btn" class="hb" style="width:100%;background:#00a32a;font-size:18px;padding:16px;margin-top:14px">➕ <?php echo hpa_t('ОПУБЛІКУВАТИ','PUBLISH')?></button>
+<div id="hpa_msg" style="display:none;margin-top:12px;padding:12px 14px;border-radius:8px;font-size:14px"></div>
+<details style="margin-top:18px;background:#f8f9fa;border-radius:10px;padding:12px 16px">
+<summary style="cursor:pointer;font-weight:bold;font-size:14px">📋 <?php echo hpa_t('Як диктувати','How to dictate')?></summary>
+<div style="margin-top:10px;font-size:13px;line-height:1.9">
+<?php if(!$en): ?>
+<b>ПРАВИЛО:</b> 🎤 → маяк → пауза → значення. Або: «заголовок Продам авто».<br>
+Фіксовані маяки: заголовок, опис, ціна, місто, категорія<br>
+<?php if(!empty($hp_attrs)): ?>Атрибути сайту: <?php echo implode(', ', array_map(fn($a)=>'«'.mb_strtolower($a['label']).'»',$hp_attrs))?><br><?php endif?>
+Нові атрибути: «атрибут якість нова» або «атрибут якість» → пауза → «нова б/у»<br>
+Мітки: «мітка терміново» → «мітка торг»
+<?php else: ?>
+<b>RULE:</b> 🎤 → beacon → pause → value. Or: «title Car for sale».<br>
+Fixed beacons: title, description, price, location, category<br>
+<?php if(!empty($hp_attrs)): ?>Site attributes: <?php echo implode(', ', array_map(fn($a)=>'«'.mb_strtolower($a['label']).'»',$hp_attrs))?><br><?php endif?>
+New attributes: «attribute condition new» or «attribute condition» → pause → «new used»<br>
+Tags: «tag urgent» → «tag negotiable»
+<?php endif?>
+</div></details>
+</div>
+<script>
+(function(){
+var C=<?php echo json_encode($cfg,JSON_UNESCAPED_UNICODE)?>;
+var photos=[],cam=null,listening=false,vs='idle',vf=null,va=null;
+function g(id){return document.getElementById(id);}
+function msg(t,tp){var d=g('hpa_msg'),bg=tp==='err'?'#f8d7da':tp==='ok'?'#d1e7dd':'#cfe2ff',cl=tp==='err'?'#58151c':tp==='ok'?'#0a3622':'#052c65';d.innerHTML=t;d.style.cssText='display:block;padding:12px 14px;border-radius:8px;background:'+bg+';color:'+cl+';margin-top:12px';clearTimeout(d._t);d._t=setTimeout(function(){d.style.display='none';},5000);}
+function bar(t,bg){var b=g('hpa_bar');b.textContent=t;b.style.cssText='display:block;padding:12px;border-radius:9px;font-size:15px;font-weight:bold;text-align:center;color:#fff;margin-bottom:8px;background:'+bg;}
+function barOff(){g('hpa_bar').style.display='none';}
+function barReady(){if(listening)bar(C.EN?'🎤 Say beacon…':'🎤 Маяк: заголовок, ціна…','#1877F2');}
+function taSet(f,v){var ta=g('hpa_ta'),found=false,out=ta.value.split('\n').map(function(l){if(l.toLowerCase().startsWith(f.toLowerCase()+':')){found=true;return f+': '+v;}return l;});if(!found)out.push(f+': '+v);ta.value=out.join('\n');}
+function taFocus(f){var ta=g('hpa_ta'),pos=0,lines=ta.value.split('\n');for(var i=0;i<lines.length;i++){if(lines[i].toLowerCase().startsWith(f.toLowerCase()+':')){var ac=pos+lines[i].indexOf(':')+2,le=pos+lines[i].length;ta.focus();ta.setSelectionRange(ac,le);ta.scrollTop=Math.max(0,i*20-50);return;}pos+=lines[i].length+1;}}
+function newAttrUpsert(n,v){var list=g('hpa_attrs'),low=n.toLowerCase();for(var r of list.querySelectorAll('.hpa_ar')){var i0=r.querySelectorAll('input')[0];if(i0.value.toLowerCase()===low){var i1=r.querySelectorAll('input')[1],cur=i1.value.trim();i1.value=cur?cur+', '+v:v;i1.style.borderColor='#198754';setTimeout(function(){i1.style.borderColor='';},1400);return;}}newAttrAdd(n,v);}
+function newAttrAdd(n,v){var list=g('hpa_attrs'),row=document.createElement('div');row.className='hpa_ar';row.style.cssText='display:flex;gap:6px;align-items:center;margin-bottom:5px';var mk=function(val,ph,fl){var i=document.createElement('input');i.type='text';i.value=val||'';i.placeholder=ph;i.style.cssText='flex:'+fl+';padding:7px 9px;border:1px solid #ccc;border-radius:6px;font-size:14px;transition:border-color .3s';return i;};var del=document.createElement('button');del.textContent='✕';del.className='hb';del.style.cssText='background:#dc3545;padding:7px 10px;font-size:12px';del.onclick=function(){row.remove();};row.append(mk(n,C.EN?'Name':'Назва',1),mk(v,C.EN?'Values':'Значення',2),del);list.appendChild(row);}
+function appendTag(v){var inp=g('hpa_tags');inp.value=inp.value.trim()?(inp.value.trim()+', '+v):v;}
+function startCam(){if(!navigator.mediaDevices)return;if(cam)cam.getTracks().forEach(function(t){t.stop();});navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}}).then(function(s){cam=s;g('hpa_cam').srcObject=s;}).catch(function(e){msg((C.EN?'❌ Camera: ':'❌ Камера: ')+e.message,'err');;});}
+startCam();
+function getBg(){var r=document.querySelectorAll('input[name="hpa_bg"]');for(var i=0;i<r.length;i++)if(r[i].checked)return r[i].value;return 'original';}
+function processPhotos(list,cb){if(!C.HAS_RBG||getBg()==='original'){cb(list);return;}var bg=getBg()==='custom'?(g('hpa_cc').value||'#ffffff').replace('#',''):getBg(),st=g('hpa_bg_st'),res=[],idx=0;if(st)st.style.display='block';function next(){if(idx>=list.length){cb(res);if(st){st.textContent=C.EN?'✅ Done!':'✅ Готово!';setTimeout(function(){st.style.display='none';},2000);}return;}if(st)st.textContent=(C.EN?'⏳ Photo ':'⏳ Фото ')+(idx+1)+'/'+list.length+'…';var fd=new FormData();fd.append('action','hpa_remove_bg');fd.append('nonce',C.NS);fd.append('image',list[idx]);fd.append('bg',bg);fetch(C.AJAX,{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){res.push(d.success&&d.data&&d.data.image?d.data.image:list[idx]);idx++;next();}).catch(function(){res.push(list[idx]);idx++;next();});}next();}
+g('hpa_photo_btn').onclick=function(){var v=g('hpa_cam');if(!v.videoWidth){msg(C.EN?'Enable camera':'Увімкніть камеру','err');return;}var c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);var d=c.toDataURL('image/jpeg',.82);photos.push(d);var img=document.createElement('img');img.src=d;img.style.cssText='width:66px;height:66px;object-fit:cover;border-radius:7px;border:2px solid #2271b1;cursor:pointer';img.onclick=function(){photos.splice(Array.from(g('hpa_gal').children).indexOf(img),1);img.remove();};g('hpa_gal').prepend(img);msg((C.EN?'✅ Photo ':'✅ Фото ')+photos.length,'ok');if(C.HAS_RBG){var w=g('hpa_bg_wrap');if(w)w.style.display='block';};};
+g('hpa_clr_btn').onclick=function(){photos=[];g('hpa_gal').innerHTML='';var w=g('hpa_bg_wrap');if(w)w.style.display='none';msg(C.EN?'Cleared':'Очищено','info');};
+g('hpa_add_attr_btn').onclick=function(){newAttrAdd('','');};
+if(window.SpeechRecognition||window.webkitSpeechRecognition){
+var SR=window.SpeechRecognition||window.webkitSpeechRecognition,rec=new SR();
+rec.lang=C.EN?'en-US':'uk-UA';rec.continuous=true;rec.interimResults=false;rec.maxAlternatives=3;
+var mb=g('hpa_mic_btn');
+mb.onclick=function(){if(!listening){try{rec.start();listening=true;vs='idle';vf=null;va=null;mb.style.cssText='flex:1;background:#dc3545;color:#fff;border:none;padding:14px;border-radius:8px;font-size:16px;font-weight:bold;cursor:pointer;animation:hpa_p 1s infinite';mb.textContent=C.EN?'🛑 STOP':'🛑 ЗУПИНИТИ';bar(C.EN?'🎤 Say beacon…':'🎤 Маяк: заголовок, ціна…','#1877F2');}catch(e){msg('❌ '+e.message,'err');}}else{listening=false;vs='idle';vf=null;va=null;rec.stop();mb.style.cssText='flex:1;background:#1877F2;color:#fff;border:none;padding:14px;border-radius:8px;font-size:16px;font-weight:bold;cursor:pointer';mb.textContent=C.EN?'🎤 VOICE INPUT':'🎤 ДИКТУВАТИ';barOff();}};
+rec.onresult=function(e){var spoken='',res=e.results[e.results.length-1];for(var i=0;i<res.length;i++){spoken=res[i].transcript.trim();if(spoken)break;}var low=spoken.toLowerCase().replace(/[.,!?;]$/g,'').trim();
+if(vs==='s_val'&&vf){taSet(vf,spoken);taFocus(vf);bar('✅ '+vf+': '+spoken,'#198754');vs='idle';vf=null;setTimeout(barReady,2200);return;}
+if(vs==='s_tag'){spoken.split(/[\s,]+/).filter(Boolean).forEach(function(v){appendTag(v);});bar('✅ '+(C.EN?'Tags: ':'Мітки: ')+spoken,'#198754');vs='idle';setTimeout(barReady,2200);return;}
+if(vs==='s_an'){va=spoken;vs='s_av';bar('⏳ '+spoken+' → '+(C.EN?'values…':'значення…'),'#fd7e14');return;}
+if(vs==='s_av'&&va){spoken.split(/[\s,]+/).filter(Boolean).forEach(function(v){newAttrUpsert(va,v);});bar('✅ '+va+': '+spoken,'#198754');vs='idle';va=null;setTimeout(barReady,2200);return;}
+// Маяк атрибут
+var at=C.ATTR_T;
+if(low===at){vs='s_an';bar(C.EN?'⏳ Attribute name…':'⏳ Назва атрибуту…','#fd7e14');return;}
+if(low.startsWith(at+' ')){var rest=spoken.substring(at.length).trim(),parts=rest.split(/\s+/);if(parts.length===1){va=rest;vs='s_av';bar('⏳ '+rest+' → '+(C.EN?'values…':'значення…'),'#fd7e14');}else{parts.slice(1).forEach(function(v){newAttrUpsert(parts[0],v);});bar('✅ '+parts[0]+': '+parts.slice(1).join(', '),'#198754');setTimeout(barReady,2200);}return;}
+// Маяк мітка
+var tt=C.TAG_T;
+if(low===tt){vs='s_tag';bar(C.EN?'⏳ Say tags…':'⏳ Говоріть мітки…','#fd7e14');return;}
+if(low.startsWith(tt+' ')){var tv=spoken.substring(tt.length).trim();tv.split(/[\s,]+/).filter(Boolean).forEach(function(v){appendTag(v);});bar('✅ '+(C.EN?'Tags: ':'Мітки: ')+tv,'#198754');setTimeout(barReady,2200);return;}
+// voiceMap
+var sorted=Object.entries(C.VM).sort(function(a,b){return b[0].length-a[0].length;}),found=null,inline=null;
+for(var j=0;j<sorted.length;j++){var trig=sorted[j][0],cfg=sorted[j][1];if(low===trig){found=cfg;inline=null;break;}if(low.startsWith(trig+' ')){found=cfg;inline=spoken.substring(trig.length).trim();break;}}
+if(!found){bar(C.EN?'💡 title/price/location/attribute…':'💡 заголовок/ціна/місто/атрибут…','#6c757d');setTimeout(barReady,3500);return;}
+if(found.type==='hp_attr'){
+    // Для атрибутів зі списком — шукаємо схоже значення
+    if(inline){taSet(found.field,inline);taFocus(found.field);bar('✅ '+found.field+': '+inline,'#198754');setTimeout(barReady,2200);}
+    else{vf=found.field;vs='s_val';taFocus(found.field);bar('⏳ '+found.field+' → '+(C.EN?'value…':'значення…'),'#fd7e14');}
+} else {
+    if(inline){taSet(found.field,inline);taFocus(found.field);bar('✅ '+found.field+': '+inline,'#198754');setTimeout(barReady,2200);}
+    else{vf=found.field;vs='s_val';taFocus(found.field);bar('⏳ '+found.field+' → '+(C.EN?'value…':'значення…'),'#fd7e14');}
+}};
+rec.onerror=function(e){if(e.error==='no-speech')return;if(e.error==='not-allowed'){bar(C.EN?'❌ Mic blocked! Chrome: 🔒 → Mic → Allow':'❌ Мікрофон! Chrome: 🔒 → Мікрофон → Дозволити','#dc3545');return;}msg((C.EN?'❌ Voice: ':'❌ Голос: ')+e.error,'err');};
+rec.onend=function(){if(listening)setTimeout(function(){try{rec.start();}catch(x){}},120);};
+}else{var mb2=g('hpa_mic_btn');mb2.disabled=true;mb2.textContent=C.EN?'❌ NOT SUPPORTED':'❌ НЕ ПІДТРИМУЄТЬСЯ';}
+g('hpa_save_btn').onclick=function(){
+if(!C.CAN){msg(C.EN?'❌ Limit! Buy license':'❌ Ліміт! Купіть ліцензію','err');return;}
+var title=g('hpa_ta').value.split('\n').filter(function(l){return l.match(/^(TITLE|ЗАГОЛОВОК):/i);})[0]||'';
+title=title.replace(/^[^:]+:\s*/,'').trim();
+if(!title){msg(C.EN?'❌ Title required!':'❌ Вкажіть заголовок!','err');return;}
+var self=this;self.disabled=true;self.textContent=C.EN?'⏳ SAVING…':'⏳ ЗБЕРІГАЮ…';
+var newAttrs=[...document.querySelectorAll('.hpa_ar')].map(function(r){var ins=r.querySelectorAll('input');var n=ins[0].value.trim(),v=ins[1].value.trim();return n&&v?{name:n,values:v.split(',').map(function(s){return s.trim();}).filter(Boolean)}:null;}).filter(Boolean);
+processPhotos([...photos],function(fp){var fd=new FormData();fd.append('action','hpa_save');fd.append('nonce',C.NS);fd.append('text',g('hpa_ta').value);fd.append('tags',g('hpa_tags').value);fd.append('new_attrs',JSON.stringify(newAttrs));fd.append('images',JSON.stringify(fp));fd.append('status',C.STATUS);
+fetch(C.AJAX,{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){if(d.success){msg((C.EN?'✅ Published! ID: ':'✅ Опубліковано! ID: ')+d.data.id,'ok');photos=[];g('hpa_gal').innerHTML='';g('hpa_attrs').innerHTML='';g('hpa_ta').value=C.TPL;g('hpa_tags').value='';var w=g('hpa_bg_wrap');if(w)w.style.display='none';self.style.background='#e67e00';self.textContent=C.EN?'➕ ADD NEXT':'➕ ДОДАТИ ЩЕ';setTimeout(function(){location.reload();},1800);}else{msg('❌ '+(d.data&&d.data.message?d.data.message:d.data||'Error'),'err');self.disabled=false;self.textContent=C.EN?'➕ PUBLISH':'➕ ОПУБЛІКУВАТИ';}}).catch(function(){msg(C.EN?'❌ Connection error':'❌ Помилка','err');self.disabled=false;self.textContent=C.EN?'➕ PUBLISH':'➕ ОПУБЛІКУВАТИ';});});
+};
+g('hpa_exp_btn').onclick=function(){var self=this;self.textContent='⏳';self.disabled=true;var fd=new FormData();fd.append('action','hpa_export');fd.append('nonce',C.NE);fetch(C.AJAX,{method:'POST',body:fd}).then(function(r){return r.blob();}).then(function(b){var u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download='hp-listings-'+new Date().toISOString().split('T')[0]+'.csv';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(u);}).catch(function(){msg(C.EN?'❌ Export error':'❌ Помилка','err');});self.textContent='📤 CSV';self.disabled=false;};
+})();
+</script>
+<?php }
+
+// ── AJAX: SAVE ─────────────────────────────────────────────────────────
+add_action('wp_ajax_hpa_save',function(){
+    if(!check_ajax_referer('hpa_save','nonce',false))wp_send_json_error('Nonce');
+    if(!current_user_can('edit_posts'))wp_send_json_error('Permission');
+    if(!hpa_can())wp_send_json_error(['message'=>hpa_t('Ліміт','Limit exceeded')]);
+    $raw=sanitize_textarea_field($_POST['text']??'');
+    $tags=sanitize_text_field($_POST['tags']??'');
+    $new_attrs=json_decode(stripslashes($_POST['new_attrs']??'[]'),true)?:[];
+    $imgs=json_decode(stripslashes($_POST['images']??'[]'),true)?:[];
+    $status=in_array($_POST['status']??'publish',['publish','pending','draft'])?$_POST['status']:'publish';
+    // Парсимо textarea
+    $data=[];
+    foreach(explode("\n",$raw) as $l){if(strpos($l,':')!==false){[$k,$v]=array_map('trim',explode(':',$l,2));if($k&&$v)$data[mb_strtoupper($k)]=$v;}}
+    $title   = $data['TITLE']??$data['ЗАГОЛОВОК']??'';
+    $content = $data['DESCRIPTION']??$data['ОПИС']??'';
+    $price   = preg_replace('/[^0-9.]/','',$data['PRICE']??$data['ЦІНА']??'');
+    $loc     = $data['LOCATION']??$data['МІСТО']??'';
+    $cat     = $data['CATEGORY']??$data['КАТЕГОРІЯ']??'';
+    if(!$title)wp_send_json_error(['message'=>hpa_t('Заголовок обов\'язковий','Title required')]);
+    $pid=wp_insert_post(['post_title'=>$title,'post_content'=>$content,'post_type'=>'hp_listing','post_status'=>$status]);
+    if(is_wp_error($pid))wp_send_json_error(['message'=>$pid->get_error_message()]);
+    if($price)update_post_meta($pid,'hp_price',$price);
+    if($loc)update_post_meta($pid,'hp_location',$loc);
+    // Категорія
+    if($cat){foreach(['hp_listing_category','hp_category'] as $ct){if(taxonomy_exists($ct)){$t=term_exists($cat,$ct)?:wp_insert_term($cat,$ct);if(!is_wp_error($t)){wp_set_object_terms($pid,(int)$t['term_id'],$ct);break;}}}}
+    // Мітки
+    if($tags){foreach(['hp_listing_tag','hp_tag','post_tag'] as $tt){if(taxonomy_exists($tt)){$ids=[];foreach(array_filter(array_map('trim',explode(',',$tags))) as $tn){$t=term_exists($tn,$tt)?:wp_insert_term($tn,$tt);if(!is_wp_error($t))$ids[]=(int)$t['term_id'];}if($ids){wp_set_object_terms($pid,$ids,$tt);break;}}}}
+    // Атрибути з textarea (hp_ таксономії)
+    $taxonomies=get_taxonomies(['object_type'=>['hp_listing']]);
+    foreach($taxonomies as $tax){if(strpos($tax,'hp_')!==0)continue;$label=mb_strtoupper(get_taxonomy($tax)->label??'');if(isset($data[$label])&&$data[$label]){$v=$data[$label];$t=term_exists($v,$tax)?:wp_insert_term($v,$tax);if(!is_wp_error($t))wp_set_object_terms($pid,(int)$t['term_id'],$tax);}}
+    // Нові атрибути
+    foreach($new_attrs as $attr){$n=sanitize_text_field($attr['name']??'');$vals=$attr['values']??[];if(!$n||empty($vals))continue;$tn='hp_'.sanitize_key(mb_strtolower($n));if(!taxonomy_exists($tn))register_taxonomy($tn,'hp_listing',['label'=>$n,'hierarchical'=>false,'show_ui'=>true,'show_in_rest'=>true]);$ids=[];foreach($vals as $val){$val=sanitize_text_field($val);if(!$val)continue;$t=term_exists($val,$tn)?:wp_insert_term($val,$tn);if(!is_wp_error($t))$ids[]=(int)$t['term_id'];}if($ids)wp_set_object_terms($pid,$ids,$tn);update_post_meta($pid,'hp_'.sanitize_key(mb_strtolower($n)),implode(', ',$vals));}
+    // Фото
+    $gallery=[];require_once ABSPATH.'wp-admin/includes/image.php';
+    foreach($imgs as $i=>$b64){$is_png=strpos($b64,'data:image/png')!==false;$img=base64_decode(preg_replace('#^data:image/\w+;base64,#i','',$b64));$ext=$is_png?'png':'jpg';$mime=$is_png?'image/png':'image/jpeg';$file=wp_upload_bits('hpa_'.$pid.'_'.time().'_'.$i.'.'.$ext,null,$img);if($file['error'])continue;$aid=wp_insert_attachment(['post_mime_type'=>$mime,'post_status'=>'inherit'],$file['file'],$pid);wp_update_attachment_metadata($aid,wp_generate_attachment_metadata($aid,$file['file']));if($i===0)set_post_thumbnail($pid,$aid);else $gallery[]=$aid;}
+    if($gallery){update_post_meta($pid,'_hp_images',implode(',',$gallery));update_post_meta($pid,'hp_images',array_merge([get_post_thumbnail_id($pid)],$gallery));}
+    hpa_inc();wp_send_json_success(['id'=>$pid]);
+});
+
+// ── AJAX: REMOVE.BG ───────────────────────────────────────────────────
+add_action('wp_ajax_hpa_remove_bg',function(){
+    if(!check_ajax_referer('hpa_save','nonce',false))wp_send_json_error('Nonce');
+    $api=get_option('hpa_rbg_api','');if(!$api)wp_send_json_error('No API key');
+    $b64=$_POST['image']??'';$bg=sanitize_text_field($_POST['bg']??'transparent');if(!$b64)wp_send_json_error('No image');
+    $data=base64_decode(preg_replace('#^data:image/\w+;base64,#i','',str_replace(' ','+',$b64)));
+    $r=wp_remote_post('https://api.remove.bg/v1.0/removebg',['headers'=>['X-Api-Key'=>$api],'body'=>['image_file_b64'=>base64_encode($data),'size'=>'auto','format'=>'png','bg_color'=>($bg==='transparent'?'':$bg)],'timeout'=>30]);
+    if(is_wp_error($r))wp_send_json_error($r->get_error_message());
+    if(wp_remote_retrieve_response_code($r)!==200){$b=json_decode(wp_remote_retrieve_body($r),true);wp_send_json_error($b['errors'][0]['title']??'Error');}
+    wp_send_json_success(['image'=>'data:image/png;base64,'.base64_encode(wp_remote_retrieve_body($r))]);
+});
+
+// ── AJAX: EXPORT ──────────────────────────────────────────────────────
+add_action('wp_ajax_hpa_export',function(){
+    if(!check_ajax_referer('hpa_export','nonce',false))wp_die('Nonce');
+    if(!current_user_can('edit_posts'))wp_die('Permission');
+    $listings=get_posts(['post_type'=>'hp_listing','posts_per_page'=>-1,'post_status'=>'any']);
+    $all_meta=[];foreach($listings as $p){foreach(array_keys(get_post_meta($p->ID)) as $k){if(strpos($k,'hp_')===0)$all_meta[$k]=true;}}
+    $meta_keys=array_keys($all_meta);
+    $taxes=array_filter(get_object_taxonomies('hp_listing'),function($t){return strpos($t,'hp_')===0;});
+    header('Content-Type: text/csv; charset=utf-8');header('Content-Disposition: attachment; filename="hp-listings-'.date('Y-m-d').'.csv"');header('Cache-Control: no-cache,no-store,must-revalidate');
+    $out=fopen('php://output','w');fprintf($out,chr(0xEF).chr(0xBB).chr(0xBF));
+    $h=array_merge(['ID','Title','Status','Date','Content','Thumbnail'],$meta_keys,array_map(function($t){return 'tax_'.$t;},$taxes));
+    fputcsv($out,$h);
+    foreach($listings as $p){$row=[$p->ID,$p->post_title,$p->post_status,$p->post_date,$p->post_content,get_the_post_thumbnail_url($p->ID,'medium')??''];foreach($meta_keys as $k){$v=get_post_meta($p->ID,$k,true);$row[]=is_array($v)?implode(', ',$v):$v;}foreach($taxes as $t){$ts=wp_get_object_terms($p->ID,$t,['fields'=>'names']);$row[]=is_wp_error($ts)?'':implode(', ',$ts);}fputcsv($out,$row);}
+    fclose($out);exit;
+});
+register_deactivation_hook(__FILE__,'__return_false');
